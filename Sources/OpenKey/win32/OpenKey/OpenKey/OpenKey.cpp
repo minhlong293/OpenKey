@@ -454,11 +454,36 @@ static void handleMacro() {
 	SendKeyCode(_keycode | (_flag & MASK_SHIFT ? CAPS_MASK : 0));
 }
 
+// Re-anchor the tracked modifier bits to the physical keyboard state.
+// A low-level hook can miss a key-up (secure desktop, focus transition,
+// unbalanced synthetic input, ...), leaving a tracked bit set forever, with
+// every later keystroke misread as shifted and the language hotkey broken
+// (upstream issue #320). Dropping bits whose keys are physically up on every
+// key event makes a stale bit self-heal on the next keystroke.
+// Only bits are ever cleared here, never set: setting stays purely
+// event-driven, so OpenKey's own Shift+Insert / Shift+Left injections
+// (SendCombineKey) can never be misread as a real Shift press when a real
+// keydown is dispatched while an injection is still in flight. Inside a
+// low-level hook GetAsyncKeyState must be used, not GetKeyState, which only
+// reflects the installing thread's message-queue state.
+static void ResyncModifierState() {
+	if (GetAsyncKeyState(VK_LSHIFT) >= 0 && GetAsyncKeyState(VK_RSHIFT) >= 0) _flag &= ~MASK_SHIFT;
+	if (GetAsyncKeyState(VK_LCONTROL) >= 0 && GetAsyncKeyState(VK_RCONTROL) >= 0) _flag &= ~MASK_CONTROL;
+	if (GetAsyncKeyState(VK_LMENU) >= 0 && GetAsyncKeyState(VK_RMENU) >= 0) _flag &= ~MASK_ALT;
+	if (GetAsyncKeyState(VK_LWIN) >= 0 && GetAsyncKeyState(VK_RWIN) >= 0) _flag &= ~MASK_WIN;
+}
+
 static bool SetModifierMask(const Uint16& vkCode) {
 	// For caps lock case, toggling the flag isn't enough. We need to check the actual state, which should be done before each key press.
 	// Example: the caps lock state can be changed without the key being pressed, or the key toggle is made with admin privilege, making the app not able to detect the change.
 	if (GetKeyState(VK_CAPITAL) == 1) _flag |= MASK_CAPITAL;
 	else _flag &= ~MASK_CAPITAL;
+
+	// Same divergence class as caps lock above: a missed key-up leaves a
+	// stale bit behind, so drop bits whose keys are physically up before
+	// applying the key that was just pressed (its own bit is set below,
+	// the event in hand always wins for its own key).
+	ResyncModifierState();
 
 	if (vkCode == VK_LSHIFT || vkCode == VK_RSHIFT) _flag |= MASK_SHIFT;
 	else if (vkCode == VK_LCONTROL || vkCode == VK_RCONTROL) _flag |= MASK_CONTROL;
@@ -475,6 +500,10 @@ static bool SetModifierMask(const Uint16& vkCode) {
 }
 
 static bool UnsetModifierMask(const Uint16& vkCode) {
+	// Drop stale bits of the other modifiers here as well: _lastFlag is
+	// copied from _flag on key release for hotkey matching, so a stale bit
+	// must not survive into it through this path either.
+	ResyncModifierState();
 	if (vkCode == VK_LSHIFT || vkCode == VK_RSHIFT) _flag &= ~MASK_SHIFT;
 	else if (vkCode == VK_LCONTROL || vkCode == VK_RCONTROL) _flag &= ~MASK_CONTROL;
 	else if (vkCode == VK_LMENU || vkCode == VK_RMENU) _flag &= ~MASK_ALT;
